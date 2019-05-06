@@ -1,26 +1,27 @@
 /*
-   FALL 2018 (GRE, PACEPRINT, ESCOLAB, CERN, theworkharder.com)
+   FALL 2018 - SPRING 2019 (GRE, PACEPRINT, ESCOLAB, CERN, theworkharder.com)
    Developed for ESCOLAB Pace University
 
-  One arduino is on the pod (transmitter) and the other connected to a computer (receiver).
+This code is for the transmitter!
+
+  One arduino is the (transmitter) and the other connected to a computer (receiver).
   THE TRANSMITTER:
-  +takes readings every 15 minutes using CHRONOGRAPH library.
+  +takes readings every 15 minutes using DS1307 RTC which wakes the Arduino up every second using the square wave output.
   +has two DS18B20 Waterproof sensors connected to it and communicating via one-wire (rig developed by Dr.Ganis)
-  +Stores readings into EEPROM (for now) (SD CARD LATER) as two floats:
-  ++One for the temperature sensor and the other for the time (millis) after the arduino starts
-  +is connected to a xbee S2, and set as coordinator with PanID = 1214
-  +Listens for the router xbee S2 (receiver) and if asked for sends all the data it has
+  +Stores readings and timestamp into an SD card as three floats:
+  ++Two floats for the temperature sensors and the third for the timestamp in the format (YYYY.MM.DD.HH.MM.SS) 
+  +is connected to an xbee S2, and set as coordinator with PanID = 1214
+  +Listens for the router xbee S2 (receiver) and if asked for, either sends all the data it has or the current data
 
 
   THE RECEIVER:
   +XBEE S2 setup as ROUTER (AT MODE) with PANID 1214
   +gets started up whenever I want to collect data from the TRANSMITTER
-  +Contacts the Transmitter and asks for data
-  +Pastes the data into the serial logger as a csv.
+  +Contacts the Transmitter and can ask for either all the data or the most current data
+  +Pastes the data into the serial logger as a csv with headers for easy import into excel or parsing to DB
 
   REFERENCE:
   Start another instance of Arduino on mac in terminal: /Applications/Arduino.app/Contents/MacOS/Arduino ;
-
 
 */
 
@@ -31,8 +32,6 @@
 #include <DallasTemperature.h>
 //Library for communicating serially through XBEE S2 (AT MODE)
 #include <SoftwareSerial.h>
-//Library for CHRONO timekeeper that fires every 15 minutes
-//#include <Chrono.h>
 //Library for writing to EEPROM
 //    #include <EEPROM.h>
 //Library for Read/Write Sd Card
@@ -41,7 +40,6 @@
 //END INCLUDE STATEMENTS
 
 //APPENDED TIME STATEMENTS
-//#include <Arduino.h>
 #include <Wire.h>
 #include "uRTCLib.h"
 //APPENDED TIME STATEMENTS
@@ -69,22 +67,22 @@
 //START GLOBAL VARIABLES
 //remember to cross xbee! Xbee Rx -> Arduino Tx & Xbee Tx -> Arduino Rx
 SoftwareSerial xbeeSerial(rxPin, txPin);
-//Chrono timeKeeper(Chrono::SECONDS);
 //temporary array that hold the time, upper temp, and lower temp.
 float values[2];
 String time = "";
 const byte quartlyTimes[4] = {0, 15, 30, 45};
-byte lastTimeFired;
-//hold the array of, lower temp, upper temp.. should just hold 25 records (300 bytes) for three*sizeFloat values.. added 4 extra bytes just in case
+//initialize the last time so we know that it's our first run
+byte lastTimeFired = 1;
+byte nextTimeFired = 60;
 
 File sdFile;
 //END GLOBAL VARIABLES
 
 void setup() {
   startSerial();
-//  removeFile(datalog);
+  //  removeFile(datalog);
   createFiles(doFilesExist(SDinit()));
-  
+
 }
 
 void loop() {
@@ -106,7 +104,7 @@ void startSerial() {
 
 
 
-void initializeTemperatureProbes(DallasTemperature sensor[],const int wireCount,OneWire probeArray[]) {
+void initializeTemperatureProbes(DallasTemperature sensor[], const int wireCount, OneWire probeArray[]) {
   DeviceAddress deviceAddress;
   Serial.println(F("Starting Temperature Probes"));
   //start up the library on all defined bus-wires
@@ -121,23 +119,19 @@ void initializeTemperatureProbes(DallasTemperature sensor[],const int wireCount,
 
 
 void didTimeKeeperFire() {
-  
-//  if (timeKeeper.hasPassed(measurementTime)) { // this is old code using the chon timer now we use the rtc
-    if (checkTime()){
+  if (checkTime()) {
     OneWire probeArray[] = {upperTemperatureSensor, lowerTemperatureSensor};
     const int wireCount = sizeof(probeArray) / sizeof(OneWire);
     DallasTemperature sensor[wireCount];
-    initializeTemperatureProbes(sensor,wireCount,probeArray);
-//    timeKeeper.restart();
+    initializeTemperatureProbes(sensor, wireCount, probeArray);
     time = getTimestamp();
-//    values[time_value] = getTime_old();
-    takeTemperatures(sensor,wireCount);
+    takeTemperatures(sensor, wireCount);
     printCurrentData();
     saveCurrentData();
   }
 }
 
-void takeTemperatures(DallasTemperature sensor[],const int wireCount) {
+void takeTemperatures(DallasTemperature sensor[], const int wireCount) {
   // call sensors.requestTemperatures() to issue a global temperature
   // request to all devices on the bus
   Serial.print(F("Requesting temperatures..."));
@@ -149,12 +143,6 @@ void takeTemperatures(DallasTemperature sensor[],const int wireCount) {
 
   for (int i = 0; i < wireCount; i++) {
     float temperature = sensor[i].getTempCByIndex(0);
-    //    Serial.print("Temperature for the sensor ");
-    //    Serial.print(i);
-    //    Serial.print(" is ");
-    //    Serial.println(temperature);
-    //this is dependent on having two sensors
-//    int adjustmentForValuesArray = i + 1;
     values[i] = temperature;
   }
 }
@@ -195,9 +183,7 @@ void checkForReceiver() {
       readFromDataTransmit(datalog);
     }
     else if (message.equals(F("current"))) {
-      //      Serial.println("Receiver says: Received message: "+ message);
       delay(transmitWait);
-//      xbeeSerial.print("Transmitter Says: Current Data is " + returnAppendedCurrentData());
       xbeeSerial.print(F("Transmitter Says: Current Data is "));
       xbeeSerial.print(time);
       xbeeSerial.print(F(","));
@@ -230,7 +216,6 @@ void readFromDataTransmit(String fileToRead) {
     byteRead = sdFile.read();
     xbeeSerial.write(byteRead);
     if (byteRead == '\n' || byteRead == '\r') {
-//      Serial.println("Breaks");
       delay(transmitWait);
     }
   }
@@ -241,22 +226,6 @@ void readFromDataTransmit(String fileToRead) {
 void saveCurrentData() {
 
   writeToFile(datalog, returnAppendedData());
-
-  //  int mailbox = 0;
-  //  while(storedValues[mailbox] > 0.00){
-  //    Serial.println(storedValues[mailbox]);
-  //    if(((mailbox +1) % 3 ) == 0){
-  //      Serial.println();
-  //    }
-  //    mailbox++;
-  //  }
-  //  storedValues[mailbox++] = values[0];
-  //  Serial.println(values[0]);
-  //  storedValues[mailbox++] = values[1];
-  //  Serial.println(values[1]) ;
-  //  storedValues[mailbox++] = values[2];
-  //  Serial.println(values[2]);
-
 }
 
 
@@ -333,7 +302,7 @@ String getTimestamp() {
   Wire.begin();
   rtc.refresh();
   Wire.end();
-  return (String(rtc.year()) +"."+ String(rtc.month()) +"."+ String(rtc.day()) +"."+ String(rtc.hour()) +"."+ String(rtc.minute()) +"."+ String(rtc.second())); 
+  return (String(rtc.year()) + "." + String(rtc.month()) + "." + String(rtc.day()) + "." + String(rtc.hour()) + "." + String(rtc.minute()) + "." + String(rtc.second()));
 }
 
 bool checkTime() {
@@ -342,27 +311,43 @@ bool checkTime() {
   uRTCLib rtc(0x68);
   Wire.begin();
   rtc.refresh();
-
   byte minute = rtc.minute();
   Wire.end();
-//  Serial.println(minute);
-//  Serial.println(getTimestamp());
-//if the minute equals any quarter of the hour return true, else return false
-
-if ((minute == quartlyTimes[0] || minute == quartlyTimes[1] || minute == quartlyTimes[2] || minute == quartlyTimes[3]) && minute != lastTimeFired) { 
+  
+  //if the minute equals any quarter of the hour return true, else return false
+  if (minute != lastTimeFired && (minute == quartlyTimes[0] || minute == quartlyTimes[1] || minute == quartlyTimes[2] || minute == quartlyTimes[3]) ) {
     lastTimeFired = minute;
+    nextTimeFired  = minute + 15; // plus the timing interval
     return true;
-}
-  else{
+  }
+  //check the edge case that we accidentally went over the time interval and need to take the measurement asap. This could happen from data transmission taking a long time
+  //for example. lastTime = 0, nextTime = 15, minute = 16
+  else if (minute > nextTimeFired){
+    lastTimeFired = minute;
+    nextTimeFired  = minute + 15;
+    return true;
+  }
+  else {
     return false;
-  } 
+  }
 }
+
+//START POWER METHODS
+
+
+
+
+//END POWER METHODS
+
+
+
+
+
+
+
+
+
+
+
 
 //END TRANSMITTER METHODS
-
-
-
-
-//START RECEIVER METHODS
-
-//END RECEIVER METHODS
