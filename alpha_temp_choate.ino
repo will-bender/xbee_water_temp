@@ -46,10 +46,10 @@ This code is for the transmitter!
 
 // START DEFINE STATEMENTS
 //define pins for xbee and two temperature sensors
-#define rxPin 3
-#define txPin 2
-#define upperTemperatureSensor 8
-#define lowerTemperatureSensor 9
+#define rxPin 5
+#define txPin 6
+#define upperTemperatureSensor A4 //arbitrary choice
+#define lowerTemperatureSensor A5 //arbitrary choice
 //array to store values of time, upperTemp_value, lowerTemp_value into values array
 #define time_value 0
 #define upperTemp_value 1
@@ -61,6 +61,13 @@ This code is for the transmitter!
 //names of the data files and system log files
 #define datalog "datalog.txt"
 #define sysLog "sysLog.txt"
+#define RTCSQpin 2
+#define CSpinSDcard 10
+#define mosfetPin 4
+//sleep library for arduino
+#include <avr/sleep.h>
+#include <avr/interrupt.h>
+
 
 // END DEFINE STATEMENTS
 
@@ -82,12 +89,14 @@ void setup() {
   startSerial();
   //  removeFile(datalog);
   createFiles(doFilesExist(SDinit()));
+  setupSleep();
 
 }
 
 void loop() {
   checkForReceiver();
   didTimeKeeperFire();
+  enableSleep();
 }
 
 //START GENERIC METHODS
@@ -120,6 +129,7 @@ void initializeTemperatureProbes(DallasTemperature sensor[], const int wireCount
 
 void didTimeKeeperFire() {
   if (checkTime()) {
+    enableMosfet();
     OneWire probeArray[] = {upperTemperatureSensor, lowerTemperatureSensor};
     const int wireCount = sizeof(probeArray) / sizeof(OneWire);
     DallasTemperature sensor[wireCount];
@@ -128,6 +138,7 @@ void didTimeKeeperFire() {
     takeTemperatures(sensor, wireCount);
     printCurrentData();
     saveCurrentData();
+    keepXbeeOn();
   }
 }
 
@@ -230,7 +241,7 @@ void saveCurrentData() {
 
 
 bool SDinit() {
-  if (!SD.begin(4)) {
+  if (!SD.begin(CSpinSDcard)) {
     Serial.println(F("Initialization failed!"));
     return false;
   }
@@ -305,6 +316,14 @@ String getTimestamp() {
   return (String(rtc.year()) + "." + String(rtc.month()) + "." + String(rtc.day()) + "." + String(rtc.hour()) + "." + String(rtc.minute()) + "." + String(rtc.second()));
 }
 
+byte getMinute(){
+  uRTCLib rtc(0x68);
+  Wire.begin();
+  rtc.refresh();
+  Wire.end();
+  return rtc.minute();
+}
+
 bool checkTime() {
   //This is the replacement method for the chronographe function I had
   //returns boolean of whether to fire or not
@@ -333,8 +352,51 @@ bool checkTime() {
 }
 
 //START POWER METHODS
+/* Different sleep modes available we are going to use SLEEP_MODE_STANDBY as seen in http://www.gammon.com.au/power and http://www.nongnu.org/avr-libc/user-manual/group__avr__sleep.html#ga3775b21f297187752bcfc434a541209a and https://www.arduino.cc/reference/en/language/functions/external-interrupts/attachinterrupt/
+ * https://arduino.stackexchange.com/questions/30968/how-do-interrupts-work-on-the-arduino-uno-and-similar-boards
+ * SLEEP_MODE_IDLE: 15 mA
+  SLEEP_MODE_ADC: 6.5 mA
+  SLEEP_MODE_PWR_SAVE: 1.62 mA
+  SLEEP_MODE_EXT_STANDBY: 1.62 mA
+  SLEEP_MODE_STANDBY : 0.84 mA keep the oscillator running
+  SLEEP_MODE_PWR_DOWN : 0.36 mA
+ */
+ //pin 2 used for interrupts
+void setupSleep(){
+  set_sleep_mode(SLEEP_MODE_STANDBY);
+}
+//enable sleep 
+void enableSleep(){
+  sleep_enable();
+  noInterrupts(); //cli
+  attachInterrupt(digitalPinToInterrupt(RTCSQpin), disableSleep, FALLING);
+  EIFR = bit(INTF0); //manually clear interrupt for pin 2 @ 0
+  interrupts(); //sei
+  sleep_cpu(); //enter sleep
+}
+//disable all sleep related things for arduino to complete other tasks
+void disableSleep(void){
+  sleep_disable();
+  detachInterrupt(digitalPinToInterrupt(2));
+}
 
+void keepXbeeOn(){
+  //keep the xbee on for 2-3 minutes after collecting data
+  byte keepOn= getMinute() + 3;
+  while(getMinute() != keepOn){
+    checkForReceiver();
+  }
+  disableMosfet();
+}
 
+void enableMosfet(){
+  pinMode(mosfetPin, OUTPUT);
+  digitalWrite(mosfetPin, HIGH);
+}
+void disableMosfet(){
+  pinMode(mosfetPin, OUTPUT);
+  digitalWrite(mosfetPin, LOW);
+}
 
 
 //END POWER METHODS
